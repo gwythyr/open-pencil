@@ -2,6 +2,7 @@ import type { SceneGraph } from '@open-pencil/scene-graph'
 
 import { computeContentBounds } from '#core/io/formats/raster'
 import { renderNodesToSVG, type SVGExportOptions, type SVGTextLayout } from '#core/io/formats/svg'
+import type { IOContext } from '#core/io/types'
 
 import { withPDFDOM, type SVGPageParser } from './dom'
 import {
@@ -14,6 +15,7 @@ import {
   type PDFFontReport
 } from './fonts'
 import type { PDFPageSpec } from './plan'
+import { renderPDFShadows } from './shadows'
 
 export interface PDFExportOptions {
   title?: string
@@ -23,6 +25,8 @@ export interface PDFExportOptions {
   textLayout?: SVGTextLayout
   /** The files of fallback faces the text layout draws characters in, to embed them too. */
   fallbackFile?: PDFFallbackFontFile
+  /** The editor's CanvasKit and renderer, to draw shadows with; a headless renderer otherwise. */
+  context?: IOContext
 }
 
 export interface PDFExportResult {
@@ -40,7 +44,7 @@ interface PreparedPage {
   height: number
 }
 
-type PageSVGOptions = Pick<SVGExportOptions, 'textLayout' | 'fontAlias'>
+type PageSVGOptions = Pick<SVGExportOptions, 'textLayout' | 'fontAlias' | 'shadowImages'>
 
 function preparePage(
   graph: SceneGraph,
@@ -85,9 +89,11 @@ async function renderPages(
   parse: SVGPageParser
 ): Promise<PDFExportResult | null> {
   const embedding = options.fonts ? planFontEmbedding(options.fonts, options.fallbackFile) : null
+  const fontAlias = embedding ? embeddedFontAlias(embedding) : undefined
   const svgOptions: PageSVGOptions = {
     textLayout: options.textLayout,
-    fontAlias: embedding ? embeddedFontAlias(embedding) : undefined
+    fontAlias,
+    shadowImages: await renderPDFShadows(graph, specs, options.context, fontAlias)
   }
   const preparePages = () =>
     specs

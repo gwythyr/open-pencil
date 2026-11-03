@@ -14,6 +14,7 @@ export {
 } from './import'
 export { isSVGMarkup } from './metadata'
 export type { SVGFontAlias, SVGFontRequest } from './defs'
+export type { SVGShadowImage, SVGShadowImageLookup, SVGShadowImages } from './shadows'
 export type { SVGCharacterEdges, SVGFallbackFace, SVGTextLayout, SVGTextLine } from './text/lines'
 export { svgImportFonts } from './text/import'
 export { renderSVGNode, svg, type SVGNode } from './node'

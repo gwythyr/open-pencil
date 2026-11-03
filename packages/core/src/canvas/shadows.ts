@@ -4,6 +4,7 @@ import type { BlendMode, Effect, SceneGraph, SceneNode } from '@open-pencil/scen
 import { drawnBlurRadius } from '@open-pencil/scene-graph/geometry'
 import Matrix from '@open-pencil/scene-graph/matrix'
 import { isLayerContainer } from '@open-pencil/scene-graph/node-defaults'
+import type { Rect } from '@open-pencil/scene-graph/primitives'
 import { regionFills } from '@open-pencil/scene-graph/vector-network'
 
 import { nodeOrientationMatrix } from '#core/geometry'
@@ -65,6 +66,38 @@ function innerShadowSpread(node: SceneNode, effect: Effect): number {
   return UNSPREAD_TYPES.has(node.type) ? 0 : effect.spread
 }
 
+function silhouetteBox(graph: SceneGraph, node: SceneNode, includeChildren: boolean): Rect {
+  return (
+    silhouetteBounds(graph, node, includeChildren) ?? {
+      x: 0,
+      y: 0,
+      width: node.width,
+      height: node.height
+    }
+  )
+}
+
+/** The box a shadow can cover, in the node's own coordinates: its silhouette, offset, blurred, spread. */
+function shadowBox(
+  graph: SceneGraph,
+  node: SceneNode,
+  effect: Effect,
+  spread: number,
+  includeChildren: boolean
+): Rect {
+  const box = silhouetteBox(graph, node, includeChildren)
+  const offset = effect.offset
+  const padding = drawnBlurRadius(effect.radius) * 2 + Math.abs(spread)
+  const x = box.x + Math.min(0, offset.x) - padding
+  const y = box.y + Math.min(0, offset.y) - padding
+  return {
+    x,
+    y,
+    width: box.x + box.width + Math.max(0, offset.x) + padding - x,
+    height: box.y + box.height + Math.max(0, offset.y) + padding - y
+  }
+}
+
 function shadowLayerBounds(
   r: SkiaRenderer,
   graph: SceneGraph,
@@ -73,20 +106,8 @@ function shadowLayerBounds(
   spread: number,
   includeChildren: boolean
 ): Float32Array {
-  const box = silhouetteBounds(graph, node, includeChildren) ?? {
-    x: 0,
-    y: 0,
-    width: node.width,
-    height: node.height
-  }
-  const offset = effect.offset
-  const padding = drawnBlurRadius(effect.radius) * 2 + Math.abs(spread)
-  return r.ck.LTRBRect(
-    box.x + Math.min(0, offset.x) - padding,
-    box.y + Math.min(0, offset.y) - padding,
-    box.x + box.width + Math.max(0, offset.x) + padding,
-    box.y + box.height + Math.max(0, offset.y) + padding
-  )
+  const box = shadowBox(graph, node, effect, spread, includeChildren)
+  return r.ck.LTRBRect(box.x, box.y, box.x + box.width, box.y + box.height)
 }
 
 /** Grows or shrinks a silhouette by the spread, square as Figma spreads a rectangle. */
@@ -435,12 +456,85 @@ export function renderLayerShadows(
   pass: 'behind' | 'front'
 ): void {
   if (!isLayerContainer(node)) return
-  const type = pass === 'behind' ? 'DROP_SHADOW' : 'INNER_SHADOW'
-  const effects = node.effects.filter((effect) => effect.visible && effect.type === type)
+  renderShadowsAlone(r, canvas, graph, node, pass === 'behind' ? 'DROP_SHADOW' : 'INNER_SHADOW')
+}
+
+/** The shadows a layer casts: drop shadows behind it, inner shadows over what it draws. */
+export type ShadowType = Extract<Effect['type'], 'DROP_SHADOW' | 'INNER_SHADOW'>
+
+/** Whether the canvas casts the layer's shadows from its children as well. */
+function shadowsIncludeChildren(graph: SceneGraph, node: SceneNode): boolean {
+  return isLayerContainer(node) && shadowIncludesChildren(graph, node)
+}
+
+function visibleShadows(node: SceneNode, type: ShadowType): Effect[] {
+  return node.effects.filter((effect) => effect.visible && effect.type === type)
+}
+
+/** Whether the layer has a visible drop or inner shadow. */
+export function hasVisibleShadows(node: SceneNode): boolean {
+  return (
+    visibleShadows(node, 'DROP_SHADOW').length > 0 ||
+    visibleShadows(node, 'INNER_SHADOW').length > 0
+  )
+}
+
+/**
+ * The box the layer's shadows of a type can cover, in its own coordinates; null when it casts
+ * none. Inner shadows stay inside the silhouette, drop shadows reach past it.
+ */
+export function shadowsBounds(graph: SceneGraph, node: SceneNode, type: ShadowType): Rect | null {
+  const effects = visibleShadows(node, type)
+  if (effects.length === 0) return null
+  const includeChildren = shadowsIncludeChildren(graph, node)
+  // What renderDropShadow and renderInnerShadow skip: nothing to cast from.
+  if (!includeChildren && !paintsCastShadow(node)) return null
+  const boxes = effects.map((effect) =>
+    type === 'DROP_SHADOW'
+      ? shadowBox(graph, node, effect, shadowSpread(node, effect), includeChildren)
+      : silhouetteBox(graph, node, includeChildren)
+  )
+  const minX = Math.min(...boxes.map((box) => box.x))
+  const minY = Math.min(...boxes.map((box) => box.y))
+  const maxX = Math.max(...boxes.map((box) => box.x + box.width))
+  const maxY = Math.max(...boxes.map((box) => box.y + box.height))
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
+/**
+ * Draws only the layer's shadows of a type, in its own coordinates, as the canvas draws them
+ * around it, for outputs that keep the layer itself as vectors, such as PDF export.
+ */
+export function renderShadowsAlone(
+  r: SkiaRenderer,
+  canvas: Canvas,
+  graph: SceneGraph,
+  node: SceneNode,
+  type: ShadowType
+): void {
+  const effects = visibleShadows(node, type)
   if (effects.length === 0) return
-  const includeChildren = shadowIncludesChildren(graph, node)
+  const includeChildren = shadowsIncludeChildren(graph, node)
   for (const effect of effects) {
-    if (pass === 'behind') renderDropShadow(r, canvas, graph, node, effect, includeChildren)
+    if (type === 'DROP_SHADOW') renderDropShadow(r, canvas, graph, node, effect, includeChildren)
     else renderInnerShadow(r, canvas, graph, node, effect, includeChildren)
   }
+}
+
+/**
+ * Erases what the layer covers, as its drop shadows lie under it: on the canvas a translucent
+ * layer fades once its fills are over its shadows, while a PDF fades each of them on its own.
+ */
+export function cutOutSilhouette(
+  r: SkiaRenderer,
+  canvas: Canvas,
+  graph: SceneGraph,
+  node: SceneNode
+): void {
+  const includeChildren = shadowsIncludeChildren(graph, node)
+  const box = silhouetteBox(graph, node, includeChildren)
+  const bounds = r.ck.LTRBRect(box.x, box.y, box.x + box.width, box.y + box.height)
+  drawKnockout(r, canvas, bounds, () =>
+    drawSilhouette(r, canvas, graph, node, 'knockout', includeChildren)
+  )
 }

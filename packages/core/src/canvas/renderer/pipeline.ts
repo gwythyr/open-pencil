@@ -15,20 +15,17 @@ import { emitNavigationTrace } from '#core/profiler'
 import { drawChromePass, drawLabelPass, drawOverlayPass } from './overlay-pass'
 import { hasTransientPreviews, renderPageWithPreviews } from './transient-previews'
 
-export function renderSceneToCanvas(
-  r: Pick<
-    SkiaRenderer,
-    | 'worldViewport'
-    | 'viewportImageRendering'
-    | 'renderNode'
-    | 'nodePaths'
-    | 'editingTextId'
-    | 'invalidateNodePicture'
-  >,
-  canvas: Canvas,
-  graph: SceneGraph,
-  pageId: string
-): void {
+type ExportDrawingRenderer = Pick<
+  SkiaRenderer,
+  | 'worldViewport'
+  | 'viewportImageRendering'
+  | 'nodePaths'
+  | 'editingTextId'
+  | 'invalidateNodePicture'
+>
+
+/** Runs `draw` as an export draws: every layer in full, whatever the viewport shows or edits. */
+export function drawForExport<T>(r: ExportDrawingRenderer, draw: () => T): T {
   r.nodePaths.releaseUncached()
   const prevViewport = r.worldViewport
   const previewMode = r.viewportImageRendering
@@ -40,16 +37,27 @@ export function renderSceneToCanvas(
   if (editing) r.invalidateNodePicture(editing)
   r.worldViewport = { x: -1e9, y: -1e9, w: 2e9, h: 2e9 }
   try {
-    const pageNode = graph.getNode(pageId)
-    if (pageNode) {
-      for (const childId of pageNode.childIds) r.renderNode(canvas, graph, childId, {})
-    }
+    return draw()
   } finally {
     r.worldViewport = prevViewport
     r.viewportImageRendering = previewMode
     r.editingTextId = editing
     if (editing) r.invalidateNodePicture(editing)
   }
+}
+
+export function renderSceneToCanvas(
+  r: ExportDrawingRenderer & Pick<SkiaRenderer, 'renderNode'>,
+  canvas: Canvas,
+  graph: SceneGraph,
+  pageId: string
+): void {
+  drawForExport(r, () => {
+    const pageNode = graph.getNode(pageId)
+    if (pageNode) {
+      for (const childId of pageNode.childIds) r.renderNode(canvas, graph, childId, {})
+    }
+  })
 }
 
 export type RenderLayer = 'full' | 'scene' | 'overlays'

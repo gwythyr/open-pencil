@@ -1,4 +1,8 @@
 import type * as HappyDOM from 'happy-dom'
+import { isValid, toUint8Array } from 'js-base64'
+
+import { imageSize } from '@open-pencil/scene-graph/images'
+import type { Size } from '@open-pencil/scene-graph/primitives'
 
 import { IS_BROWSER } from '#core/constants'
 
@@ -16,23 +20,66 @@ interface SVGParser {
 }
 
 /**
- * The globals svg2pdf reads: it parses a page's stylesheets in a document it makes, and keeps the
- * rules that are instances of the CSSOM classes.
+ * The globals svg2pdf reads: it parses a page's stylesheets in a document it makes, keeps the
+ * rules that are instances of the CSSOM classes, and loads each image to learn its size.
  */
 interface SVG2PDFGlobals {
   document?: unknown
   CSSStyleSheet?: unknown
   CSSStyleRule?: unknown
+  Image?: unknown
 }
 
-const SVG2PDF_GLOBALS = ['document', 'CSSStyleSheet', 'CSSStyleRule'] as const
+const SVG2PDF_GLOBALS = ['document', 'CSSStyleSheet', 'CSSStyleRule', 'Image'] as const
 
 type SVG2PDFGlobal = (typeof SVG2PDF_GLOBALS)[number]
 
 function removeGlobal(scope: SVG2PDFGlobals, name: SVG2PDFGlobal): void {
   if (name === 'document') delete scope.document
   else if (name === 'CSSStyleSheet') delete scope.CSSStyleSheet
-  else delete scope.CSSStyleRule
+  else if (name === 'CSSStyleRule') delete scope.CSSStyleRule
+  else delete scope.Image
+}
+
+/**
+ * The pixel size of an image svg2pdf passes as a base64 data URL, read from the file's header;
+ * null for anything else.
+ */
+function dataURLImageSize(src: string): Size | null {
+  const comma = src.indexOf(',')
+  if (!src.startsWith('data:') || !src.slice(0, comma).endsWith(';base64')) return null
+  const base64 = src.slice(comma + 1)
+  return isValid(base64) ? imageSize(toUint8Array(base64)) : null
+}
+
+/**
+ * An `Image` that reads its data URL's size instead of decoding it, all svg2pdf loads one for: an
+ * image it draws is embedded by jsPDF, which reads the file itself. happy-dom loads no images.
+ */
+class MeasuringImage {
+  width = 0
+  height = 0
+  onload: (() => void) | null = null
+  onerror: ((error: unknown) => void) | null = null
+  #src = ''
+
+  get src(): string {
+    return this.#src
+  }
+
+  set src(value: string) {
+    this.#src = value
+    queueMicrotask(() => {
+      const size = dataURLImageSize(value)
+      if (!size) {
+        this.onerror?.(new Error('Unreadable image'))
+        return
+      }
+      this.width = size.width
+      this.height = size.height
+      this.onload?.()
+    })
+  }
 }
 
 /**
@@ -74,7 +121,8 @@ async function withHappyDOM<T>(draw: (parse: SVGPageParser) => Promise<T>): Prom
   const values: Required<SVG2PDFGlobals> = {
     document: dom.document,
     CSSStyleSheet: dom.CSSStyleSheet,
-    CSSStyleRule: dom.CSSStyleRule
+    CSSStyleRule: dom.CSSStyleRule,
+    Image: MeasuringImage
   }
   // Each global replaced, with its descriptor before, so an accessor a host defines comes back as
   // one and a global that could not be replaced is left as it was.

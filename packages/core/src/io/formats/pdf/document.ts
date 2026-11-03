@@ -1,5 +1,6 @@
 import type { SceneGraph } from '@open-pencil/scene-graph'
 
+import type { IOContext } from '#core/io/types'
 import { fontManager } from '#core/text/font/manager'
 
 import { renderPagesToPDFDetailed, type PDFExportResult } from './export'
@@ -12,6 +13,8 @@ export interface PDFDocumentOptions {
   /** Lay the pages out first, as pages other than the open one have no layout yet. */
   layOutPages?: boolean
   title?: string
+  /** The editor's CanvasKit and renderer, to draw shadows with; a headless renderer otherwise. */
+  context?: IOContext
 }
 
 /**
@@ -35,7 +38,8 @@ export async function exportPDFDocument(
         file === 0
           ? fontManager.loadedData(family, style)
           : (fontManager.shardData(family, style)[file - 1] ?? null),
-      title: options.title
+      title: options.title,
+      context: options.context
     })
   )
 }

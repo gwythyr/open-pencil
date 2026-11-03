@@ -6,16 +6,7 @@ import { lineStrokePath } from '#core/canvas/strokes/line'
 import { fittedDashPattern } from '#core/canvas/strokes/sides'
 import { exportBounds } from '#core/io/formats/raster'
 
-import {
-  nextDefId,
-  formatSolidColor,
-  createFilterDef,
-  drawnFills,
-  resolveFill,
-  solidFillOpacity,
-  SVG_STROKE_CAP,
-  SVG_STROKE_JOIN
-} from './defs'
+import { nextDefId, createFilterDef, drawnFills, solidFillOpacity } from './defs'
 import {
   round,
   geometryBlobToSVGPath,
@@ -30,17 +21,27 @@ import {
 export { geometryBlobToSVGPath, nodeOutlinePath, type OutlineNode } from './paths'
 
 import type { SceneGraph, SceneNode, Fill, Stroke, VectorNetwork } from '@open-pencil/scene-graph'
-import {
-  hasRegionFills,
-  looseSegments,
-  regionSVGPaths
-} from '@open-pencil/scene-graph/vector-network'
+import { isLayerContainer } from '@open-pencil/scene-graph/node-defaults'
+import { looseSegments, regionSVGPaths } from '@open-pencil/scene-graph/vector-network'
 
 import { arrowHeadElements, openPathElements, vectorArrowHeads } from './arrows'
 import type { SVGExportContext, SVGFontAlias } from './defs'
 import { svg, renderSVGNode } from './node'
 import type { SVGNode } from './node'
+import {
+  exportedFill,
+  hasPathLevelFills,
+  shapePaint,
+  type ShapePaint,
+  type SVGAttrs
+} from './paint'
 import { fillOutlines, outlineElements } from './regions'
+import {
+  filteredEffects,
+  shadowElements,
+  type SVGShadowImageLookup,
+  type SVGShadowImages
+} from './shadows'
 import { alignedStroke, alignedStrokeElement, shapeWithTextDetailElements } from './strokes'
 import { renderTextNode } from './text/export'
 import type { SVGTextLayout } from './text/lines'
@@ -60,8 +61,6 @@ function networkElements(
   if (looseSegments(network).length === 0) return regions
   return [...regions, ...openPathElements(node, network, common, looseSegments)]
 }
-
-type SVGAttrs = Record<string, string | number | undefined>
 
 function vectorShapeElements(
   node: SceneNode,
@@ -230,7 +229,8 @@ function buildTransformAttr(node: SceneNode): string | undefined {
 
 function buildGroupAttrs(
   node: SceneNode,
-  ctx: SVGExportContext
+  ctx: SVGExportContext,
+  shadowImages: SVGShadowImages | null
 ): { attrs: Record<string, string | number | undefined>; clipId?: string } {
   const attrs: Record<string, string | number | undefined> = {}
 
@@ -244,7 +244,7 @@ function buildGroupAttrs(
     attrs.style = `mix-blend-mode: ${blend}`
   }
 
-  const filterDef = createFilterDef(node.effects, ctx)
+  const filterDef = createFilterDef(filteredEffects(node, shadowImages), ctx)
   if (filterDef) {
     ctx.defs.push(filterDef.node)
     attrs.filter = `url(#${filterDef.id})`
@@ -263,35 +263,6 @@ function buildGroupAttrs(
   }
 
   return { attrs, clipId }
-}
-
-function buildSVGStrokeAttrs(
-  visibleStrokes: Stroke[],
-  colorSpace: 'srgb' | 'display-p3',
-  nodeCap: SceneNode['strokeCap']
-): Record<string, string | number | undefined> {
-  if (visibleStrokes.length === 0) return {}
-  const stroke = visibleStrokes[0]
-  const cap = stroke.cap ?? nodeCap
-  const attrs: Record<string, string | number | undefined> = {
-    // Opacity 1 keeps the color opaque. Display P3 must not also keep color alpha here, or a
-    // viewer multiplies it by stroke-opacity; the canvas paints stroke.opacity alone.
-    stroke: formatSolidColor(stroke.color, 1, colorSpace),
-    'stroke-width': round(stroke.weight)
-  }
-  if (stroke.opacity < 1) attrs['stroke-opacity'] = round(stroke.opacity)
-  if (cap !== 'NONE') attrs['stroke-linecap'] = SVG_STROKE_CAP[cap] ?? 'butt'
-  if (stroke.join && stroke.join !== 'MITER') {
-    attrs['stroke-linejoin'] = SVG_STROKE_JOIN[stroke.join] ?? 'miter'
-  }
-  if (stroke.dashPattern && stroke.dashPattern.length > 0) {
-    attrs['stroke-dasharray'] = stroke.dashPattern.map((n) => round(n)).join(' ')
-  }
-  return attrs
-}
-
-function hasPathLevelFills(node: SceneNode): boolean {
-  return node.type === 'VECTOR' && hasRegionFills(node.vectorNetwork)
 }
 
 function buildShapeChildren(
@@ -364,20 +335,45 @@ function fillAndStrokeElements(
   return []
 }
 
-/** The paint CSS `color` sets, for a tinted icon path. */
-const CURRENT_COLOR = 'currentColor'
+/**
+ * Whether a layer's inner shadow goes between its fills and its strokes, where the canvas paints
+ * a shape's. Containers paint theirs over their children, and a vector's own region fills cannot
+ * be drawn apart from its strokes.
+ */
+function innerShadowUnderStrokes(node: SceneNode, paint: ShapePaint): boolean {
+  return !isLayerContainer(node) && paint.visibleStrokes.length > 0 && !hasPathLevelFills(node)
+}
 
-/** A paint's SVG color and, for an sRGB solid, the `fill-opacity` beside it. */
-function exportedFill(
-  fill: Fill | undefined,
+function shapeElements(node: SceneNode, paint: ShapePaint, ctx: SVGExportContext): SVGNode[] {
+  const { visibleFills, fillAttr, fillOpacity, strokeAttrs, visibleStrokes } = paint
+  return buildShapeChildren(
+    node,
+    visibleFills,
+    fillAttr,
+    fillOpacity,
+    strokeAttrs,
+    visibleStrokes,
+    ctx
+  )
+}
+
+/** The layer's own fills and strokes, with `inner` drawn between them when given. */
+function ownElements(
   node: SceneNode,
-  ctx: SVGExportContext
-): { color: string | null; opacity: number | undefined } {
-  if (!fill) return { color: null, opacity: undefined }
-  return {
-    color: resolveFill(fill, node, ctx),
-    opacity: solidFillOpacity(fill, ctx.colorSpace)
-  }
+  paint: ShapePaint,
+  ctx: SVGExportContext,
+  inner: SVGNode | null
+): SVGNode[] {
+  if (!inner) return shapeElements(node, paint, ctx)
+  return [
+    ...shapeElements(node, { ...paint, strokeAttrs: {}, visibleStrokes: [] }, ctx),
+    inner,
+    ...shapeElements(
+      node,
+      { ...paint, visibleFills: [], fillAttr: null, fillOpacity: undefined },
+      ctx
+    )
+  ]
 }
 
 function renderNode(node: SceneNode, ctx: SVGExportContext): SVGNode | null {
@@ -410,7 +406,8 @@ function layerId(name: string, ids: NonNullable<SVGExportContext['layerIds']>): 
 }
 
 function drawNode(node: SceneNode, ctx: SVGExportContext): SVGNode | null {
-  const { attrs: groupAttrs, clipId } = buildGroupAttrs(node, ctx)
+  const shadows = shadowElements(node, ctx.shadowImages)
+  const { attrs: groupAttrs, clipId } = buildGroupAttrs(node, ctx, shadows.images)
 
   if (node.type === 'TEXT') {
     const fill = exportedFill(
@@ -418,34 +415,21 @@ function drawNode(node: SceneNode, ctx: SVGExportContext): SVGNode | null {
       node,
       ctx
     )
-    return svg('g', groupAttrs, renderTextNode(node, fill.color, ctx, fill.opacity))
+    return svg(
+      'g',
+      groupAttrs,
+      shadows.drop,
+      renderTextNode(node, fill.color, ctx, fill.opacity),
+      shadows.inner
+    )
   }
 
-  const visibleFills = node.fills.filter((f) => f.visible)
-  const visibleStrokes = node.strokes.filter((s) => s.visible)
-  const tint = ctx.tint?.(node) ?? []
-  const ownFill = visibleFills.length > 0 && !hasPathLevelFills(node) ? visibleFills[0] : undefined
-  const fill = exportedFill(ownFill, node, ctx)
-  const tintedFill = fill.color !== null && tint.includes('fill')
-  const fillAttr = tintedFill ? CURRENT_COLOR : fill.color
-  // `currentColor` has no alpha. Display P3 normally bakes solid opacity into the color, which a
-  // tint throws away, so a tinted solid keeps `fill-opacity` in every color space.
-  const fillOpacity = ownFill ? solidFillOpacity(ownFill, ctx.colorSpace, tintedFill) : fill.opacity
-  const ownStrokes = buildSVGStrokeAttrs(visibleStrokes, ctx.colorSpace, node.strokeCap)
-  const strokeAttrs =
-    ownStrokes.stroke && tint.includes('stroke')
-      ? { ...ownStrokes, stroke: CURRENT_COLOR }
-      : ownStrokes
-
-  const children: (SVGNode | null)[] = buildShapeChildren(
-    node,
-    visibleFills,
-    fillAttr,
-    fillOpacity,
-    strokeAttrs,
-    visibleStrokes,
-    ctx
-  )
+  const paint = shapePaint(node, ctx)
+  const innerUnderStrokes = innerShadowUnderStrokes(node, paint)
+  const children: (SVGNode | null)[] = [
+    shadows.drop,
+    ...ownElements(node, paint, ctx, innerUnderStrokes ? shadows.inner : null)
+  ]
 
   const childNodes = ctx.graph.getChildren(node.id)
   const childContent: SVGNode[] = []
@@ -459,6 +443,7 @@ function drawNode(node: SceneNode, ctx: SVGExportContext): SVGNode | null {
   } else {
     children.push(...childContent)
   }
+  if (!innerUnderStrokes) children.push(shadows.inner)
 
   const validChildren = children.filter((c): c is SVGNode => c !== null)
 
@@ -498,6 +483,11 @@ export interface SVGExportOptions {
   layerIds?: boolean
   /** Size the drawing to the layers' boxes rather than to everything they draw. */
   useAbsoluteBounds?: boolean
+  /**
+   * Images to draw a layer's shadows with instead of SVG filters, for renderers that ignore
+   * filters, such as svg2pdf.js writing a PDF.
+   */
+  shadowImages?: SVGShadowImageLookup
 }
 
 export function renderNodesToSVG(
@@ -520,7 +510,8 @@ export function renderNodesToSVG(
     colorSpace: options.colorSpace ?? 'srgb',
     textLayout: options.textLayout,
     fontAlias: options.fontAlias,
-    layerIds: options.layerIds ? { names: new Map(), taken: new Set() } : undefined
+    layerIds: options.layerIds ? { names: new Map(), taken: new Set() } : undefined,
+    shadowImages: options.shadowImages
   }
 
   const contentNodes: SVGNode[] = []

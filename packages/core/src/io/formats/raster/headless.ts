@@ -6,6 +6,12 @@ import { SkiaRenderer } from '#core/canvas'
 
 import { renderNodesToImage, renderThumbnail, type ExportFormat } from './render'
 
+/** A CanvasKit and the renderer drawing with it. */
+export interface HeadlessRenderer {
+  ck: CanvasKit
+  renderer: SkiaRenderer
+}
+
 let cachedCk: Promise<CanvasKit> | null = null
 let cachedRenderer: Promise<SkiaRenderer> | null = null
 
@@ -32,13 +38,13 @@ async function loadCanvasKit(): Promise<CanvasKit> {
  * provider, which holds a copy of each font loaded after it, so a second one doubles that memory.
  * It keeps paths by layer id, which another document's layers share, so a caller measuring a
  * different document clears `nodePaths` and calls `invalidateAllPictures()` first, as
- * `headlessRenderNodes` does.
+ * `preparedHeadlessRenderer` does.
  */
 export async function headlessRenderer(): Promise<SkiaRenderer> {
   return (await getRenderer()).renderer
 }
 
-async function getRenderer(): Promise<{ ck: CanvasKit; renderer: SkiaRenderer }> {
+async function getRenderer(): Promise<HeadlessRenderer> {
   const ck = await initCanvasKit()
   // Callers that arrive together share one renderer rather than each making their own.
   cachedRenderer ??= createRenderer(ck).catch((error: unknown) => {
@@ -59,6 +65,23 @@ async function createRenderer(ck: CanvasKit): Promise<SkiaRenderer> {
   return renderer
 }
 
+/**
+ * The shared headless renderer, ready to draw these nodes of `graph`: their fonts, images, and
+ * paths loaded, and nothing left from the document it drew before.
+ */
+export async function preparedHeadlessRenderer(
+  graph: SceneGraph,
+  pageId: string,
+  nodeIds: string[]
+): Promise<HeadlessRenderer> {
+  const { ck, renderer } = await getRenderer()
+  // One renderer serves every document: paths keyed by layer id must not outlive theirs.
+  renderer.nodePaths.clear()
+  renderer.invalidateAllPictures()
+  await renderer.prepareForExport(graph, pageId, nodeIds)
+  return { ck, renderer }
+}
+
 export async function headlessRenderNodes(
   graph: SceneGraph,
   pageId: string,
@@ -71,11 +94,7 @@ export async function headlessRenderNodes(
     useAbsoluteBounds?: boolean
   } = {}
 ): Promise<Uint8Array | null> {
-  const { ck, renderer } = await getRenderer()
-  // One renderer serves every document: paths keyed by layer id must not outlive theirs.
-  renderer.nodePaths.clear()
-  renderer.invalidateAllPictures()
-  await renderer.prepareForExport(graph, pageId, nodeIds)
+  const { ck, renderer } = await preparedHeadlessRenderer(graph, pageId, nodeIds)
   return renderNodesToImage(ck, renderer, graph, pageId, nodeIds, {
     scale: options.scale ?? 1,
     format: options.format ?? 'PNG',
@@ -91,10 +110,10 @@ export async function headlessRenderThumbnail(
   width: number,
   height: number
 ): Promise<Uint8Array | null> {
-  const { ck, renderer } = await getRenderer()
-  // One renderer serves every document: paths keyed by layer id must not outlive theirs.
-  renderer.nodePaths.clear()
-  renderer.invalidateAllPictures()
-  await renderer.prepareForExport(graph, pageId, graph.getNode(pageId)?.childIds ?? [])
+  const { ck, renderer } = await preparedHeadlessRenderer(
+    graph,
+    pageId,
+    graph.getNode(pageId)?.childIds ?? []
+  )
   return renderThumbnail(ck, renderer, graph, pageId, width, height)
 }

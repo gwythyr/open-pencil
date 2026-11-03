@@ -122,6 +122,11 @@ function fontRequest(
   }
 }
 
+/** Whether the text is written in a face `fontAlias` names, such as a face a PDF embeds. */
+export function textFaceAliased(node: SceneNode, fontAlias: SVGFontAlias): boolean {
+  return fontAlias(fontRequest(node)) !== null
+}
+
 function isLogicalTextEnd(node: SceneNode, direction: 'LTR' | 'RTL'): boolean {
   return (
     (direction === 'LTR' && node.textAlignHorizontal === 'RIGHT') ||

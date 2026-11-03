@@ -19,6 +19,7 @@ import type { FontFaceRef } from '#core/text/font/faces'
 
 import { svg, type SVGNode } from './node'
 import { round } from './paths'
+import type { SVGShadowImageLookup } from './shadows'
 import type { SVGTextLayout } from './text/lines'
 
 /**
@@ -53,6 +54,8 @@ export interface SVGExportContext {
    * given out so far, defs included, so no two elements share one.
    */
   layerIds?: { names: Map<string, number>; taken: Set<string> }
+  /** Shadows drawn as images instead of SVG filters. */
+  shadowImages?: SVGShadowImageLookup
 }
 
 export function nextDefId(ctx: SVGExportContext, prefix: string): string {

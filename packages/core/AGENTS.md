@@ -86,6 +86,7 @@ Canvas is CanvasKit (Skia WASM) on a WebGL surface, not DOM.
 - `packages/core/src/canvas/scene.ts` walks the tree and dispatches: text draws in `canvas/text/render.ts`, a layer's strokes in `canvas/strokes/dispatch.ts`, and a shape with effects through its node picture in `canvas/renderer/node-pictures.ts`; keep `scene.ts` to traversal and move a new drawing domain beside those.
 - `forVisibleStrokes` (`packages/core/src/canvas/strokes.ts`) is where a stroke's shader and dash are set and cleared, for shapes and booleans alike; stroke draw helpers take an already-configured `strokePaint` and must not reset its shader, and a dash goes on through `withStrokeDash`, which frees the effect (`packages/core/tests/canvas/strokes.test.ts`).
 - Shadows are cast from what a layer draws, children included, through `drawSilhouette` (`packages/core/src/canvas/shadows/silhouette.ts`); a container's shadows are drawn by `renderLayerShadows` around its children, not by `renderShape`. A faster path for a shape must give the same pixels as its silhouette (`packages/core/tests/canvas/shadows.test.ts`).
+- An output that keeps layers as vectors but cannot blur, such as PDF through svg2pdf.js, draws their shadows as images from `renderShadowsAlone` (`packages/core/src/canvas/shadows.ts`), the canvas's own shadow code, passed to SVG export as `shadowImages` (`packages/core/tests/io/formats/pdf/shadows.test.ts`).
 
 ### Caches
 
